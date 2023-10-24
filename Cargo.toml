@@ -1,5 +1,5 @@
 [package]
-name = "interact-with-near-nft-example"
+name = "contract"
 version = "1.0.0"
 authors = ["garikbesson@gmail.com"]
 edition = "2021"
