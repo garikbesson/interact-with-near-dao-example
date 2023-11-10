@@ -1,12 +1,15 @@
-use near_contract_standards::non_fungible_token::{Token, TokenId};
+use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
+use near_contract_standards::fungible_token::core::ext_ft_core::ext;
 use near_sdk::ext_contract;
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
 use near_sdk::json_types::U128;
-use near_sdk::{env, log, near_bindgen, Gas, AccountId, Promise, PromiseError};
+use near_sdk::serde::{Deserialize, Serialize};
+use near_sdk::{env, near_bindgen, serde_json, log, Gas, AccountId, Promise, PromiseOrValue, PromiseError};
 
-// const NFT_CONTRACT: &str = "x.paras.near";
-const NFT_CONTRACT: &str = "paras-token-v2.testnet";
-const NFT_MARKETPLACE_CONTRACT: &str = "paras-marketplace-v2.testnet";
+const FT_CONTRACT: &str = "token-v3.cheddar.testnet";
+const AMM_CONTRACT: &str = "v2.ref-finance.near";
+
+const PRICE: u128 = 100_000_000_000_000_000_000_000;
 const YOCTO_NEAR: u128 = 1;
 const TGAS: u64 = 1_000_000_000_000;
 
@@ -14,122 +17,131 @@ const TGAS: u64 = 1_000_000_000_000;
 #[near_bindgen]
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct Contract {
-  nft_contract: AccountId,
-  nft_marketplace_contract: AccountId
+  ft_contract: AccountId,
+  amm_contract: AccountId,
+  price: U128
 }
 
 impl Default for Contract {
     // The default trait with which to initialize the contract
     fn default() -> Self {
         Self {
-          nft_contract: NFT_CONTRACT.parse().unwrap(),
-          nft_marketplace_contract: NFT_MARKETPLACE_CONTRACT.parse().unwrap(),
+          ft_contract: FT_CONTRACT.parse().unwrap(),
+          amm_contract: AMM_CONTRACT.parse().unwrap(),
+          price: U128(PRICE),
         }
     }
 }
 
+// Message parameters to receive via token function call.
+#[derive(Serialize, Deserialize)]
+#[serde(crate = "near_sdk::serde")]
+#[serde(untagged)]
+enum TokenReceiverMessage {
+  Action {
+    // Parameters which you want to get in msg object, e.g. buyer_id
+    buyer_id: Option<AccountId>,
+  },
+}
+
 // Validator interface, for cross-contract calls
-#[ext_contract(ext_nft_contract)]
-trait ExternalNftContract {
-  fn nft_token(&self, token_id: TokenId) -> Promise;
-  fn nft_transfer(&self, receiver_id: AccountId, token_id: TokenId) -> Promise;
-  fn nft_mint(&self, token_series_id: String, receiver_id: AccountId) -> Promise;
-  fn buy(&self, nft_contract_id: AccountId, token_id: TokenId, ft_token_id: Option<AccountId>, price: Option<U128>) -> Promise;
+#[ext_contract(ext_amm_contract)]
+trait ExternalAmmContract {
+  fn swap(&self, pool_id: u64, token_in: AccountId, token_out: AccountId, amount_in: u128, min_amount_out: U128) -> Promise;
 }
 
 // Implement the contract structure
 #[near_bindgen]
 impl Contract {
-  pub fn nft_token(&self, token_id: TokenId) -> Promise {
-    let promise = ext_nft_contract::ext(self.nft_contract.clone())
-      .nft_token(token_id);
-
-    return promise.then( // Create a promise to callback nft_token_callback
-      Self::ext(env::current_account_id())
-      .nft_token_callback()
-    )
-  }
-
-  #[private] // Public - but only callable by env::current_account_id()
-  pub fn nft_token_callback(&self, #[callback_result] call_result: Result<Token, PromiseError>) -> Option<Token> {
-    // Check if the promise succeeded
-    if call_result.is_err() {
-      log!("There was an error contacting NFT contract");
-      return None;
-    }
-
-    // Return the token data
-    let token_data: Token = call_result.unwrap();
-    return Some(token_data);
-  }
-
-  // Before transfering token in a such way you may need to force user to approve your smart contract on NFT contract.
   #[payable]
-  pub fn nft_transfer(&mut self, receiver_id: AccountId, token_id: TokenId) -> Promise {
-    let promise = ext_nft_contract::ext(self.nft_contract.clone())
+  pub fn send_tokens(&mut self, receiver_id: AccountId, amount: U128) -> Promise {
+    assert_eq!(env::attached_deposit(), 1, "Requires attached deposit of exactly 1 yoctoNEAR");
+
+    let promise = ext(self.ft_contract.clone())
       .with_attached_deposit(YOCTO_NEAR)
-      .nft_transfer(receiver_id, token_id);
+      .ft_transfer(receiver_id, amount, None);
 
     return promise.then( // Create a promise to callback query_greeting_callback
       Self::ext(env::current_account_id())
-      .nft_transfer_callback()
+      .with_static_gas(Gas(30*TGAS))
+      .external_call_callback()
     )
   }
 
   #[private] // Public - but only callable by env::current_account_id()
-  pub fn nft_transfer_callback(&self, #[callback_result] call_result: Result<(), PromiseError>) {
+  pub fn external_call_callback(&self, #[callback_result] call_result: Result<(), PromiseError>) {
     // Check if the promise succeeded
     if call_result.is_err() {
-      log!("There was an error contacting NFT contract");
+      log!("There was an error contacting external contract");
     }
   }
 
   #[payable]
-  pub fn nft_mint(&mut self, token_series_id: String, receiver_id: AccountId) -> Promise {
-    let promise = ext_nft_contract::ext(self.nft_contract.clone())
-      .with_static_gas(Gas(30*TGAS))
-      .with_attached_deposit(env::attached_deposit())
-      .nft_mint(token_series_id, receiver_id);
+  pub fn swap_tokens(&mut self, pool_id: u64, token_in: AccountId, token_out: AccountId, amount_in: u128, min_amount_out: U128) -> Promise {
+    assert_eq!(env::attached_deposit(), 1, "Requires attached deposit of exactly 1 yoctoNEAR");
+
+    let promise = ext_amm_contract::ext(self.amm_contract.clone())
+      .with_static_gas(Gas(300*TGAS))
+      .with_attached_deposit(YOCTO_NEAR)
+      .swap(pool_id, token_in, token_out, amount_in, min_amount_out);
 
     return promise.then( // Create a promise to callback query_greeting_callback
       Self::ext(env::current_account_id())
       .with_static_gas(Gas(30*TGAS))
-      .nft_mint_callback()
+      .external_call_callback()
     )
-  }
-
-  #[private] // Public - but only callable by env::current_account_id()
-  pub fn nft_mint_callback(&self, #[callback_result] call_result: Result<TokenId, PromiseError>) -> Option<TokenId> {
-    // Check if the promise succeeded
-    if call_result.is_err() {
-      log!("There was an error contacting NFT contract");
-      return None;
-    }
-
-    // Return the token data
-    let token_id: TokenId = call_result.unwrap();
-    return Some(token_id);
   }
 
   #[payable]
-  pub fn buy(&mut self, nft_contract_id: AccountId, token_id: TokenId, ft_token_id: Option<AccountId>, price: Option<U128>) -> Promise {
-    let promise = ext_nft_contract::ext(self.nft_marketplace_contract.clone())
-      .with_static_gas(Gas(30*TGAS))
-      .with_attached_deposit(env::attached_deposit())
-      .buy(nft_contract_id, token_id, ft_token_id, price);
+  pub fn call_with_attached_tokens(&mut self, receiver_id: AccountId, amount: U128) -> Promise {
+    assert_eq!(env::attached_deposit(), 1, "Requires attached deposit of exactly 1 yoctoNEAR");
+
+    let promise = ext(self.ft_contract.clone())
+      .with_static_gas(Gas(150*TGAS))
+      .with_attached_deposit(YOCTO_NEAR)
+      .ft_transfer_call(receiver_id, amount, None, "".to_string());
 
     return promise.then( // Create a promise to callback query_greeting_callback
       Self::ext(env::current_account_id())
-      .with_static_gas(Gas(30*TGAS))
-      .buy_callback()
+      .with_static_gas(Gas(100*TGAS))
+      .external_call_callback()
     )
   }
+}
 
-  #[private] // Public - but only callable by env::current_account_id()
-  pub fn buy_callback(&self, #[callback_result] call_result: Result<(), PromiseError>) {
-    // Check if the promise succeeded
-    if call_result.is_err() {
-      log!("There was an error contacting NFT contract");
+#[near_bindgen]
+impl FungibleTokenReceiver for Contract {
+  // Callback on receiving tokens by this contract.
+  // `msg` format is either "" for deposit or `TokenReceiverMessage`.
+  fn ft_on_transfer(
+    &mut self,
+    sender_id: AccountId,
+    amount: U128,
+    msg: String,
+  ) -> PromiseOrValue<U128> {
+    let token_in = env::predecessor_account_id();
+
+    assert!(token_in == self.ft_contract, "{}", "The token is not supported");
+    assert!(amount >= self.price, "{}", "The attached amount is not enough");
+
+    log!(format!("Sender id: {:?}", sender_id).as_str());
+
+    if msg.is_empty() {
+      // Your internal logic here
+      PromiseOrValue::Value(U128(0))
+    } else {
+      let message =
+        serde_json::from_str::<TokenReceiverMessage>(&msg).expect("WRONG_MSG_FORMAT");
+      match message {
+        TokenReceiverMessage::Action {
+          buyer_id,
+        } => {
+          let buyer_id = buyer_id.map(|x| x.to_string());
+          log!(format!("Target buyer id: {:?}", buyer_id).as_str());
+          // Your internal business logic
+          PromiseOrValue::Value(U128(0))
+        }
+      }
     }
   }
 }
