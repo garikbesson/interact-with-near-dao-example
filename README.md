@@ -1,6 +1,6 @@
-# How to interact with FT from smart contract
+# How to interact with DAO from smart contract
 
-The smart contract exposes for methods to show how to interact with FTs from smart contract in different ways.
+The smart contract exposes for methods to show how to interact with DAOs from smart contract in different ways.
 
 # Quickstart
 
